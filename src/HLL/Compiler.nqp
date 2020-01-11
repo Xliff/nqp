@@ -1,5 +1,9 @@
 my $more-code-sentinel := nqp::hash();
 
+constant TEMP-CHARS  := 15;
+constant MAX-RETRIES := 10;
+constant FILE-CHARS  := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789';
+
 # Provides base functionality for a compiler object.
 class HLL::Compiler does HLL::Backend::Default {
     has @!stages;
@@ -23,7 +27,7 @@ class HLL::Compiler does HLL::Backend::Default {
         @!stages     := nqp::split(' ', 'start parse ast ' ~ $!backend.stages());
 
         # Command options and usage.
-        @!cmdoptions := nqp::split(' ', 'e=s help|h target=s trace|t=s encoding=s output|o=s source-name=s combine version|v show-config verbose-config|V stagestats=s? ll-exception rxtrace nqpevent=s profile=s? profile-compile=s? profile-filename=s profile-kind=s profile-stage=s repl-mode=s'
+        @!cmdoptions := nqp::split(' ', 'e=s help|h target=s trace|t=s encoding=s output|o=s temp-output source-name=s combine version|v show-config verbose-config|V stagestats=s? ll-exception rxtrace nqpevent=s profile=s? profile-compile=s? profile-filename=s profile-kind=s profile-stage=s repl-mode=s'
 #?if js
         ~ ' substagestats beautify nqp-runtime=s perl6-runtime=s libpath=s shebang execname=s source-map'
 #?endif
@@ -305,6 +309,7 @@ class HLL::Compiler does HLL::Backend::Default {
 
         my $result;
         my $error;
+        my $output;
         my $has_error := 0;
         my $target := nqp::lc(%adverbs<target>);
         try {
@@ -336,16 +341,53 @@ class HLL::Compiler does HLL::Backend::Default {
                 elsif %adverbs<combine> { $result := self.evalfiles(@a, |%adverbs) }
                 else { $result := self.evalfiles(@a[0], |@a, |%adverbs) }
 
-                if !nqp::isnull($result) && ($!backend.is_textual_stage($target) || %adverbs<output>) {
-                    my $output := %adverbs<output>;
-                    my $fh := ($output eq '' || $output eq '-')
-                            ?? stdout()
-                            !! open($output, :w);
-                    self.panic("Cannot write to $output") unless $fh;
-                    $fh.print($result);
-                    $fh.flush();
-                    close($fh) unless ($output eq '' || $output eq '-');
+                my $fh;
+                if !nqp::isnull($result) {
+                    if $!backend.is_textual_stage($target) {
+                        # --temp-output could go here.
+                        if %adverbs<temp-output> && !%adverbs<output> {
+                            nqp::srand(
+                              nqp::floor_n(nqp::mul_n(nqp::time_n(),10000))
+                            );
+                            my $attempts := MAX-RETRIES;
+
+                            repeat {
+                                my $chr := TEMP-CHARS;
+                                my $tmpnam := '';
+
+                                while $chr {
+                                    my $rc := nqp::floor_n(
+                                        nqp::rand_n(nqp::chars(FILE-CHARS))
+                                    );
+                                    $tmpnam := nqp::concat(
+                                        $tmpnam,
+                                        nqp::substr($filechars, $rc, 1)
+                                    );
+                                    $chr--;
+                                }
+                                $output = $tmpnam;
+                                $fh := open($output, :w);
+                                last if $fh;
+                            } while $attempts--;
+                            self.panic(
+                                "Could not open tempfile in $attempts attempts"
+                            ) unless $fh;
+                        } elsif %adverbs<output> {
+                            my $fh := ($output eq '' || $output eq '-')
+                                ?? stdout()
+                                !! open($output, :w);
+                            self.panic("Cannot write to $output") unless $fh;
+                        }
+
+                        if $fh {
+                            $fh.print($result);
+                            $fh.flush();
+                            close($fh) unless ($output eq '' || $output eq '-');
+                            nqp::say('Output written to ' ~ $output);
+                        }
+                    }
                 }
+
                 CONTROL {
                     if nqp::can(self, 'handle-control') {
                         self.handle-control($_);
